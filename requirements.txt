@@ -1,0 +1,8 @@
+# Windows 版依赖（macOS 也能用，只是 pythonnet 会被 marker 跳过）
+# 装法：python -m pip install -r requirements.txt
+sherpa-onnx==1.13.8        # 语音识别 + VAD 引擎（PyPI 有 win_amd64 wheel，无需编译）
+sounddevice==0.5.6         # 麦克风采集（wheel 内含 PortAudio，不用另装）
+numpy==2.5.4
+pywebview==6.2.1           # 用系统 WebView 渲染界面；Windows 走 EdgeChromium
+pythonnet>=3.0.3; sys_platform == "win32"   # pywebview 在 Windows 上的必需后端绑定
+pyinstaller==6.22.3        # 仅打包时需要

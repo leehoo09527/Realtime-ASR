@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>实时语音转写</title>
+<style>
+  :root {
+    --bg: #F6F6F4;
+    --card: #FFFFFF;
+    --line: #E6E6E1;
+    --text: #1C1C1A;
+    --muted: #8A8A82;
+    --accent: #2F6FEB;
+    --accent-soft: #EAF1FE;
+    --danger: #C7413A;
+    --ok: #2E7D4F;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  /* 界面控件不参与选中，但转写内容必须能用鼠标选、能 Cmd+C。
+     WebKit 内核（WKWebView）需要 -webkit- 前缀，两个都写才稳。 */
+  header, footer, .btn, .ghost, .status, .meta {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .board, .board * {
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 24px 14px;
+  }
+  .title { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+  .title small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #C9C9C2; flex: none; }
+  .dot.ready { background: var(--ok); }
+  .dot.running { background: var(--danger); animation: pulse 1.4s infinite; }
+  .dot.paused { background: #D9A62E; }
+  .dot.error { background: var(--danger); }
+  .dot.loading { background: #D9A62E; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+
+  /* ---------- 字幕区 ---------- */
+  main { flex: 1; overflow: hidden; padding: 0 24px; }
+  .board {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    height: 100%;
+    overflow-y: auto;
+    padding: 20px 22px 28px;
+    scroll-behavior: smooth;
+  }
+  .board::-webkit-scrollbar { width: 8px; }
+  .board::-webkit-scrollbar-thumb { background: #DEDED8; border-radius: 4px; }
+
+  .empty {
+    color: var(--muted); font-size: 13.5px;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; height: 100%; gap: 10px; text-align: center;
+  }
+  .empty .big { font-size: 28px; opacity: .35; }
+
+  .line { display: flex; gap: 12px; padding: 7px 0; align-items: flex-start; }
+  .line .stamp {
+    flex: none; font-size: 11px; color: var(--muted);
+    font-variant-numeric: tabular-nums; padding-top: 4px; min-width: 54px;
+  }
+  .line .txt { font-size: 15px; line-height: 1.75; flex: 1; min-width: 0; }
+  .line.fresh .txt { animation: fadein .45s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }
+
+  .pending {
+    margin-top: 10px; padding-top: 12px; border-top: 1px dashed var(--line);
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .pending .stamp { flex: none; font-size: 11px; color: var(--accent); padding-top: 4px; min-width: 54px; }
+  /* 未定稿的一行：稳态部分正常显示，还在变的部分套蓝色底 */
+  .pending .txt {
+    font-size: 15px; line-height: 1.95; color: #2A2A26;
+    flex: 1; min-width: 0;
+  }
+  .pending .txt .unstable {
+    background: #DCE9FF;
+    color: #1B4FBF;
+    border-radius: 4px;
+    padding: 1px 3px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+
+  /* 暂停 / 继续 的分隔标记 */
+  .divider {
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--muted);
+    padding: 12px 0 8px;
+    letter-spacing: .6px;
+  }
+  .pending .txt::after { content: "▍"; color: var(--accent); font-style: normal; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0 } }
+
+  /* ---------- 底部 ---------- */
+  footer {
+    display: flex; align-items: center; gap: 16px;
+    padding: 18px 24px 22px;
+  }
+  .btn {
+    border: none; cursor: pointer; border-radius: 11px;
+    font: 15px/1 -apple-system, "PingFang SC", sans-serif;
+    font-weight: 600; padding: 13px 30px;
+    transition: transform .12s ease, background .15s ease, opacity .15s;
+    background: var(--accent); color: #fff;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: none; }
+  .btn.stop { background: var(--danger); }
+  .btn:disabled { opacity: .45; cursor: default; transform: none; }
+
+  .ghost {
+    background: transparent; color: #55554F; border: 1px solid var(--line);
+    font: 13px/1 -apple-system, "PingFang SC", sans-serif;
+    padding: 10px 16px; border-radius: 9px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .ghost:hover { background: #EFEFEB; color: var(--text); }
+  .ghost.keep { border-color: #C7DBFF; color: var(--accent); }
+  .ghost.keep:hover { background: var(--accent-soft); color: var(--accent); }
+
+  .meta { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 12.5px; color: var(--muted); }
+  .meta b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .toast {
+    position: fixed; left: 50%; bottom: 88px; transform: translateX(-50%) translateY(8px);
+    background: #2A2A26; color: #fff; font-size: 12.5px;
+    padding: 9px 16px; border-radius: 8px; opacity: 0; pointer-events: none;
+    transition: opacity .2s, transform .2s; max-width: 70vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="title">
+      实时语音转写
+      <small>全程本机识别 · 音频不出设备</small>
+    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">正在准备…</span></div>
+  </header>
+
+  <main>
+    <div class="board" id="board">
+      <div class="empty" id="empty">
+        <div class="big">◍</div>
+        <div>点下方「开始」就能实时出字</div>
+        <div style="font-size:12.5px">适合会议、访谈、听课——说完一句自动定稿</div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <button class="btn" id="toggle" disabled>开始</button>
+    <button class="btn stop" id="stop" style="display:none">结束</button>
+    <button class="ghost keep" id="stop-keep" style="display:none">保存音频并结束</button>
+    <button class="ghost keep" id="copy-path" title="复制本轮结果文件的完整路径，可直接粘给大模型做整理">复制文件路径</button>
+    <button class="ghost" id="folder">数据目录</button>
+    <div class="meta">
+      <span>时长 <b id="clock">00:00</b></span>
+      <span>已记 <b id="count">0</b> 句</span>
+      <span>结果文件 <b id="file">--</b></span>
+    </div>
+  </footer>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let phase = "boot";      // boot | ready | running | error
+let timer = null;
+let seconds = 0;
+let count = 0;
+let pendingEl = null;
+let prevPartial = "";   // 上一次的临时结果，用来比对出「稳态 / 非稳态」
+let finals = [];        // 本轮所有定稿内容（界面自己留一份，供需要时取用）
+
+function toast(msg, ms = 2200) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("on");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("on"), ms);
+}
+
+function setStatus(state, info) {
+  const prev = phase;
+  phase = state;
+  $("dot").className = "dot " + (state === "ready" ? "ready" : state);
+  $("statusText").textContent = info;
+
+  const main = $("toggle");
+  const stopBtn = $("stop");
+  const keepBtn = $("stop-keep");
+  stopBtn.disabled = false;
+  keepBtn.disabled = false;
+
+  // 「结束」「保存音频并结束」只在识别进行中出现
+  const live = (state === "running" || state === "paused");
+  stopBtn.style.display = live ? "" : "none";
+  keepBtn.style.display = live ? "" : "none";
+
+  if (state === "running") {
+    main.textContent = "暂停";
+    main.className = "btn";
+    main.disabled = false;
+    if (prev === "paused") resumeClock(); else startClock();
+    refreshFile();
+  } else if (state === "paused") {
+    main.textContent = "继续";
+    main.className = "btn";
+    main.disabled = false;
+    stopClock();
+  } else if (state === "loading") {
+    main.textContent = "准备中…";
+    main.disabled = true;
+  } else {
+    // ready / stopped / error
+    main.textContent = "开始";
+    main.className = "btn";
+    main.disabled = false;
+    stopClock();
+  }
+}
+
+function tickClock() {
+  seconds++;
+  const m = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const s = String(seconds % 60).padStart(2, "0");
+  $("clock").textContent = m + ":" + s;
+}
+function startClock() {
+  stopClock();
+  seconds = 0;
+  $("clock").textContent = "00:00";
+  timer = setInterval(tickClock, 1000);
+}
+function resumeClock() {
+  if (timer) return;
+  timer = setInterval(tickClock, 1000);
+}
+function stopClock() { if (timer) { clearInterval(timer); timer = null; } }
+
+function addDivider(text) {
+  if (pendingEl) { pendingEl.remove(); pendingEl = null; }
+  prevPartial = "";
+  const d = document.createElement("div");
+  d.className = "divider";
+  d.textContent = text;
+  $("board").appendChild(d);
+  scrollDown();
+}
+
+function appendFinal(text, clock, index) {
+  const empty = $("empty");
+  if (empty) empty.remove();
+  if (pendingEl) { pendingEl.remove(); pendingEl = null; }
+  prevPartial = "";   // 这句已经定稿，下一句重新开始比对
+
+  const row = document.createElement("div");
+  row.className = "line fresh";
+  const stamp = document.createElement("div");
+  stamp.className = "stamp"; stamp.textContent = clock || "";
+  const body = document.createElement("div");
+  body.className = "txt"; body.textContent = text;
+  row.append(stamp, body);
+  $("board").appendChild(row);
+  finals.push(text);
+  count = index || count + 1;
+  $("count").textContent = count;
+  scrollDown();
+}
+
+function showPending(text) {
+  if (!pendingEl) {
+    pendingEl = document.createElement("div");
+    pendingEl.className = "pending";
+    pendingEl.innerHTML = '<div class="stamp">识别中</div><div class="txt"></div>';
+    $("board").appendChild(pendingEl);
+    prevPartial = "";
+  }
+
+  // 与上一次结果逐字比较：开头一致的部分已经定型（稳态），后面还在变（非稳态）
+  let n = 0;
+  const max = Math.min(prevPartial.length, text.length);
+  while (n < max && prevPartial[n] === text[n]) n++;
+  const stable = text.slice(0, n);
+  const unstable = text.slice(n);
+  prevPartial = text;
+
+  const box = pendingEl.querySelector(".txt");
+  box.textContent = "";
+  if (stable) box.appendChild(document.createTextNode(stable));
+  if (unstable) {
+    const sp = document.createElement("span");
+    sp.className = "unstable";
+    sp.textContent = unstable;
+    box.appendChild(sp);
+  }
+  scrollDown();
+}
+
+function scrollDown() {
+  const b = $("board");
+  b.scrollTop = b.scrollHeight;
+}
+
+function clearBoard() {
+  count = 0;
+  $("count").textContent = "0";
+  pendingEl = null;
+  prevPartial = "";
+  finals = [];
+  $("board").innerHTML =
+    '<div class="empty" id="empty"><div class="big">◍</div>' +
+    '<div>点下方「开始」就能实时出字</div>' +
+    '<div style="font-size:12.5px">适合会议、访谈、听课——说完一句自动定稿</div></div>';
+}
+
+// ---------- 主进程推送入口 ----------
+window.onAsr = function (kind, data) {
+  if (kind === "status") {
+    if (data.state === "paused") {
+      addDivider("⏸ 已暂停 · 麦克风已释放");
+    } else if (data.state === "running" && phase === "paused") {
+      addDivider("▶ 已继续");
+    }
+    setStatus(data.state, data.info || "");
+  } else if (kind === "partial") {
+    showPending(data.text);
+  } else if (kind === "final") {
+    appendFinal(data.text, data.clock, data.index);
+  }
+};
+
+// ---------- 绑定 ----------
+$("toggle").onclick = async () => {
+  const btn = $("toggle");
+  if (phase === "running") {
+    btn.disabled = true;
+    await window.pywebview.api.pause();
+  } else if (phase === "paused") {
+    btn.disabled = true;
+    await window.pywebview.api.resume();
+  } else {
+    btn.disabled = true;
+    clearBoard();
+    await window.pywebview.api.start();
+  }
+};
+
+$("stop").onclick = async () => {
+  $("toggle").disabled = true;
+  $("stop").disabled = true;
+  $("stop-keep").disabled = true;
+  $("statusText").textContent = "正在结束…";
+  await window.pywebview.api.stop(false);
+};
+
+$("stop-keep").onclick = async () => {
+  $("toggle").disabled = true;
+  $("stop").disabled = true;
+  $("stop-keep").disabled = true;
+  $("statusText").textContent = "正在保存音频…";
+  await window.pywebview.api.stop(true);
+};
+
+$("copy-path").onclick = async (e) => {
+  // 复制的是结果文件的完整路径，而不是正文：
+  // 拿路径直接喂给大模型/脚本做洗稿、会议纪要，比复制一堆口语原文更好用。
+  e.currentTarget.blur();
+  const r = await window.pywebview.api.copy_path();
+  if (r && r.ok) toast("已复制路径：" + r.path);
+  else toast((r && r.msg) || "复制失败");
+};
+
+$("folder").onclick = () => window.pywebview.api.open_data_dir();
+
+async function refreshFile() {
+  try {
+    const r = await window.pywebview.api.current_file();
+    $("file").textContent = r && r.ok ? r.path.split(/[\\/]/).pop() : "--";
+  } catch (e) {
+    $("file").textContent = "--";
+  }
+}
+
+// ---------- 启动 ----------
+window.addEventListener("pywebviewready", async () => {
+  window.__wvReady = true;
+  const r = await window.pywebview.api.boot();
+  if (!r || !r.ok) return;
+});
+
+// 兜底：3 秒还没接上应用环境，说明只是网页预览，给明确指引
+setTimeout(() => {
+  if (window.__wvReady) return;
+  setStatus("error", "未连接到应用环境");
+  const b = $("board");
+  if (b) {
+    b.innerHTML =
+      '<div class="empty"><div class="big">⚠︎</div>' +
+      '<div>这里只是网页预览，接不到麦克风</div>' +
+      '<div style="font-size:12.5px">请回到访达，双击「启动语音转写.command」打开真正的应用</div></div>';
+  }
+}, 3000);
+</script>
+</body>
+</html>
